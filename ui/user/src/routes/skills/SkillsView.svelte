@@ -14,7 +14,27 @@
 	import { profile } from '$lib/stores';
 	import { setUrlParamAndUpdateUrl } from '$lib/url';
 	import { openUrl } from '$lib/utils.js';
-	import { Bot, Download, GitBranch, PencilRuler, TriangleAlert } from '@lucide/svelte';
+	import {
+		ancestorsOf,
+		buildFolderTree,
+		findFolder,
+		inFolder,
+		toSkillRows,
+		type FolderNode
+	} from './skill-folders';
+	import {
+		Bot,
+		ChevronDown,
+		ChevronRight,
+		Download,
+		Folder,
+		GitBranch,
+		Library,
+		PencilRuler,
+		TriangleAlert
+	} from '@lucide/svelte';
+	import { untrack } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import { fade } from 'svelte/transition';
 	import { twMerge } from 'tailwind-merge';
 
@@ -42,6 +62,31 @@
 	let selectedSkillToInstall = $state<Skill | undefined>(undefined);
 	let selectedTab = $state<'macos/linux' | 'windows'>('macos/linux');
 	let skillRepositoriesMap = $derived(new Map(skillRepositories.map((d) => [d.id, d])));
+
+	// Folder browser: the folders the skills sit in, as a tree. The selected folder lives in the URL (?folder=).
+	let skillRows = $derived(toSkillRows(skills));
+	let folderTree = $derived(buildFolderTree(skillRows));
+	let folderPath = $derived(page.url.searchParams.get('folder') ?? '');
+	let currentFolder = $derived(findFolder(folderTree, folderPath) ?? folderTree);
+	let includeSubfolders = $state(true);
+	const openFolders = new SvelteSet<string>(ancestorsOf(untrack(() => folderPath)));
+	// `folder` belongs to the folder browser, not to a table column filter.
+	let tableFilters = $derived(
+		Object.fromEntries(Object.entries(urlFilters).filter(([key]) => key !== 'folder'))
+	);
+
+	function selectFolder(path: string) {
+		// Only the selected branch stays open, so the tree stays short.
+		openFolders.clear();
+		ancestorsOf(path).forEach((p) => openFolders.add(p));
+		setUrlParamAndUpdateUrl(page.url, 'folder', path);
+	}
+
+	function toggleFolder(path: string) {
+		if (openFolders.has(path)) openFolders.delete(path);
+		else openFolders.add(path);
+	}
+
 	let clientUnzipCommands = $derived.by(() => {
 		const skillName = sanitizeFilenameSegment(
 			selectedSkillToInstall?.name ?? selectedSkillToInstall?.id ?? 'skill'
@@ -85,17 +130,19 @@
 		];
 	});
 	let skillsTableData = $derived(
-		(query
-			? skills.filter(
-					(d) =>
-						d.name?.toLowerCase().includes(query.toLowerCase()) ||
-						d.description?.toLowerCase().includes(query.toLowerCase())
-				)
-			: skills
-		).map((d) => ({
-			...d,
-			repository: d.repoID ? (skillRepositoriesMap.get(d.repoID)?.displayName ?? '') : ''
-		}))
+		skillRows
+			.filter((d) => inFolder(d, currentFolder.path, includeSubfolders))
+			.filter(
+				(d) =>
+					!query ||
+					d.name?.toLowerCase().includes(query.toLowerCase()) ||
+					d.description?.toLowerCase().includes(query.toLowerCase()) ||
+					d.folderPath.toLowerCase().includes(query.toLowerCase())
+			)
+			.map((d) => ({
+				...d,
+				repository: d.repoID ? (skillRepositoriesMap.get(d.repoID)?.displayName ?? '') : ''
+			}))
 	);
 
 	function updateSearchQuery(value: string) {
@@ -127,96 +174,163 @@
 	</div>
 
 	{#if skills.length > 0}
-		<Table
-			data={skillsTableData}
-			fields={profile.current.hasAdminAccess?.()
-				? ['displayName', 'description', 'repository']
-				: ['displayName', 'description']}
-			noDataMessage={m.skills_no_skills_found()}
-			classes={{
-				root: 'rounded-md shadow-sm'
-			}}
-			sortable={profile.current.hasAdminAccess?.()
-				? ['displayName', 'repository']
-				: ['displayName']}
-			filterable={profile.current.hasAdminAccess?.() ? ['repository'] : []}
-			headers={[
-				{
-					title: m.core_name(),
-					property: 'displayName'
-				},
-				{
-					title: m.core_description(),
-					property: 'description'
-				},
-				{
-					title: m.core_repository(),
-					property: 'repository'
-				}
-			]}
-			onClickRow={(d, isCtrlClick) => {
-				if (d.valid) {
-					openUrl(`/skills/${d.id}`, isCtrlClick);
-				}
-			}}
-			setRowClasses={(d) => {
-				if (d.validationError) {
-					return 'opacity-50 cursor-default dark:hover:bg-transparent hover:bg-transparent';
-				}
-				return '';
-			}}
-			filters={urlFilters}
-			{onFilter}
-			{onClearAllFilters}
-		>
-			{#snippet onRenderColumn(property, d)}
-				{#if property === 'displayName'}
-					<span class="flex items-center gap-2">
-						{d.displayName}
-						{#if d.validationError}
-							<div use:tooltip={{ text: d.validationError }}>
-								<TriangleAlert class="size-3 text-warning" />
-							</div>
-						{/if}
-					</span>
-				{:else if property === 'repository'}
-					<span class="block min-w-0 truncate">{d.repository}</span>
-				{:else if property === 'description'}
-					<span class="line-clamp-2 text-sm">{d.description ?? '—'}</span>
-				{:else}
-					{d[property as keyof typeof d]}
-				{/if}
-			{/snippet}
-			{#snippet actions(d)}
-				<div class="flex items-center gap-1">
-					{#if d.valid}
-						<div id={`install-skill-btn-container-${d.id}`}>
-							<button
-								class="btn btn-primary btn-sm text-nowrap"
-								id={`install-skill-btn-${d.id}`}
-								onclick={(e) => {
-									e.stopPropagation();
-									selectedSkillToInstall = d;
-									installSkillDialog?.open();
-								}}
-							>
-								{m.skills_install()}
-							</button>
-						</div>
-					{/if}
-					<a
-						class="btn btn-square btn-ghost hover:text-blue-500 btn-sm tooltip tooltip-left"
-						href={`${d.repoURL}/tree/${d.repoRef || d.commitSHA || 'main'}/${d.relativePath}`}
-						rel="external noopener noreferrer"
-						target="_blank"
-						onclick={(e) => e.stopPropagation()}
-						data-tip={m.skills_view_source_on_git()}
+		<div class="flex gap-2">
+			{#if folderTree.children.length > 0}
+				<!-- The tree stays in view while the skill list next to it scrolls with the page. -->
+				<nav
+					aria-label={m.skills_folders()}
+					class="bg-base-100 dark:bg-base-200 sticky top-14 hidden max-h-[calc(100vh-8rem)] w-64 shrink-0 self-start overflow-y-auto rounded-md p-2 shadow-sm md:block"
+				>
+					<button
+						class={twMerge(
+							'hover:bg-base-200 dark:hover:bg-base-300 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm',
+							!currentFolder.path && 'bg-base-200 dark:bg-base-300 font-medium'
+						)}
+						onclick={() => selectFolder('')}
 					>
-						<GitBranch class="size-4" />
-					</a>
-				</div>
-			{/snippet}
-		</Table>
+						<Library class="size-4 shrink-0" />
+						<span>{m.skills_all_skills()}</span>
+						<span class="text-muted-content ml-auto text-xs">{folderTree.count}</span>
+					</button>
+					{@render folderBranch(folderTree.children, 0)}
+				</nav>
+			{/if}
+			<div class="flex min-w-0 flex-1 flex-col gap-2">
+				{#if currentFolder.path}
+					<div class="flex flex-wrap items-center gap-1 text-sm">
+						<button class="link link-hover" onclick={() => selectFolder('')}>
+							{m.skills_all_skills()}
+						</button>
+						{#each ancestorsOf(currentFolder.path) as path (path)}
+							<ChevronRight class="text-muted-content size-3" />
+							<button class="link link-hover" onclick={() => selectFolder(path)}>
+								{path.split('/').at(-1)}
+							</button>
+						{/each}
+						{#if currentFolder.children.length > 0}
+							<label class="ml-auto flex cursor-pointer items-center gap-2">
+								<input
+									type="checkbox"
+									class="checkbox checkbox-sm"
+									bind:checked={includeSubfolders}
+								/>
+								{m.skills_include_subfolders()}
+							</label>
+						{/if}
+					</div>
+				{/if}
+				{#if currentFolder.children.length > 0}
+					<div class="flex flex-wrap gap-1.5">
+						{#each currentFolder.children as child (child.path)}
+							<button
+								class="border-base-300 hover:bg-base-200 dark:hover:bg-base-300 flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs"
+								onclick={() => selectFolder(child.path)}
+							>
+								<Folder class="size-3.5 shrink-0" />
+								{child.name}
+								<span class="text-muted-content">{child.count}</span>
+							</button>
+						{/each}
+					</div>
+				{/if}
+				<Table
+					data={skillsTableData}
+					fields={profile.current.hasAdminAccess?.()
+						? ['displayName', 'folderPath', 'description', 'repository']
+						: ['displayName', 'folderPath', 'description']}
+					noDataMessage={m.skills_no_skills_found()}
+					classes={{
+						root: 'rounded-md shadow-sm'
+					}}
+					sortable={profile.current.hasAdminAccess?.()
+						? ['displayName', 'folderPath', 'repository']
+						: ['displayName', 'folderPath']}
+					filterable={profile.current.hasAdminAccess?.() ? ['repository'] : []}
+					headers={[
+						{
+							title: m.core_name(),
+							property: 'displayName'
+						},
+						{
+							title: m.skills_folder(),
+							property: 'folderPath'
+						},
+						{
+							title: m.core_description(),
+							property: 'description'
+						},
+						{
+							title: m.core_repository(),
+							property: 'repository'
+						}
+					]}
+					onClickRow={(d, isCtrlClick) => {
+						if (d.valid) {
+							openUrl(`/skills/${d.id}`, isCtrlClick);
+						}
+					}}
+					setRowClasses={(d) => {
+						if (d.validationError) {
+							return 'opacity-50 cursor-default dark:hover:bg-transparent hover:bg-transparent';
+						}
+						return '';
+					}}
+					filters={tableFilters}
+					{onFilter}
+					{onClearAllFilters}
+				>
+					{#snippet onRenderColumn(property, d)}
+						{#if property === 'displayName'}
+							<span class="flex items-center gap-2">
+								{d.displayName}
+								{#if d.validationError}
+									<div use:tooltip={{ text: d.validationError }}>
+										<TriangleAlert class="size-3 text-warning" />
+									</div>
+								{/if}
+							</span>
+						{:else if property === 'repository'}
+							<span class="block min-w-0 truncate">{d.repository}</span>
+						{:else if property === 'folderPath'}
+							<span class="block min-w-0 truncate">{d.folderPath || '—'}</span>
+						{:else if property === 'description'}
+							<span class="line-clamp-2 text-sm">{d.description ?? '—'}</span>
+						{:else}
+							{d[property as keyof typeof d]}
+						{/if}
+					{/snippet}
+					{#snippet actions(d)}
+						<div class="flex items-center gap-1">
+							{#if d.valid}
+								<div id={`install-skill-btn-container-${d.id}`}>
+									<button
+										class="btn btn-primary btn-sm text-nowrap"
+										id={`install-skill-btn-${d.id}`}
+										onclick={(e) => {
+											e.stopPropagation();
+											selectedSkillToInstall = d;
+											installSkillDialog?.open();
+										}}
+									>
+										{m.skills_install()}
+									</button>
+								</div>
+							{/if}
+							<a
+								class="btn btn-square btn-ghost hover:text-blue-500 btn-sm tooltip tooltip-left"
+								href={`${d.repoURL}/tree/${d.repoRef || d.commitSHA || 'main'}/${d.relativePath}`}
+								rel="external noopener noreferrer"
+								target="_blank"
+								onclick={(e) => e.stopPropagation()}
+								data-tip={m.skills_view_source_on_git()}
+							>
+								<GitBranch class="size-4" />
+							</a>
+						</div>
+					{/snippet}
+				</Table>
+			</div>
+		</div>
 	{:else if showLicenseError}
 		<div class="my-12 flex w-md flex-col items-center gap-4 self-center text-center">
 			<TriangleAlert class="size-12 text-warning" />
@@ -238,6 +352,47 @@
 		</div>
 	{/if}
 </div>
+
+{#snippet folderBranch(nodes: FolderNode[], depth: number)}
+	{#each nodes as node (node.path)}
+		<div
+			class={twMerge(
+				'hover:bg-base-200 dark:hover:bg-base-300 flex items-center gap-1 rounded-md pr-2 text-sm',
+				currentFolder.path === node.path && 'bg-base-200 dark:bg-base-300 font-medium'
+			)}
+			style={`padding-left: ${depth * 14}px`}
+		>
+			<button
+				class="btn btn-ghost btn-xs btn-square"
+				aria-label={openFolders.has(node.path)
+					? m.skills_collapse_folder({ name: node.name })
+					: m.skills_expand_folder({ name: node.name })}
+				aria-expanded={openFolders.has(node.path)}
+				disabled={node.children.length === 0}
+				onclick={() => toggleFolder(node.path)}
+			>
+				{#if node.children.length > 0}
+					{#if openFolders.has(node.path)}
+						<ChevronDown class="size-3" />
+					{:else}
+						<ChevronRight class="size-3" />
+					{/if}
+				{/if}
+			</button>
+			<button
+				class="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left"
+				onclick={() => selectFolder(node.path)}
+			>
+				<Folder class="size-4 shrink-0" />
+				<span class="truncate">{node.name}</span>
+				<span class="text-muted-content ml-auto text-xs">{node.count}</span>
+			</button>
+		</div>
+		{#if openFolders.has(node.path)}
+			{@render folderBranch(node.children, depth + 1)}
+		{/if}
+	{/each}
+{/snippet}
 
 <ResponsiveDialog
 	bind:this={installSkillDialog}
