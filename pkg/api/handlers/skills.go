@@ -38,6 +38,7 @@ type SkillHandler struct {
 	maxRepoSizeMB          int
 	skillAccessRuleHelper  *skillaccessrule.Helper
 	materializeSkillSource func(ctx context.Context, skill *v1.Skill, token string, maxRepoSizeMB int) (func(), string, error)
+	installTokens          *installTokenStore
 }
 
 type skillRepositoryCredentialRevealer interface {
@@ -48,6 +49,7 @@ func NewSkillHandler(maxRepoSizeMB int, skillAccessRuleHelper *skillaccessrule.H
 	return &SkillHandler{
 		skillAccessRuleHelper:  skillAccessRuleHelper,
 		maxRepoSizeMB:          maxRepoSizeMB,
+		installTokens:          newInstallTokenStore(skillInstallTokenTTL),
 		materializeSkillSource: skillrepository.MaterializeSkillSource,
 	}
 }
@@ -173,7 +175,11 @@ func (h *SkillHandler) Download(req api.Context) error {
 	if err != nil {
 		return err
 	}
+	return h.writeSkillZip(req, skill)
+}
 
+// writeSkillZip streams the skill as a ZIP archive.
+func (h *SkillHandler) writeSkillZip(req api.Context, skill *v1.Skill) error {
 	cleanup, skillDir, err := h.materialize(req, skill)
 	if err != nil {
 		return fmt.Errorf("failed to materialize skill source: %w", err)

@@ -8,6 +8,7 @@
 	import { PAGE_TRANSITION_DURATION } from '$lib/constants';
 	import { sanitizeFilenameSegment, saveBlob } from '$lib/download';
 	import { m } from '$lib/i18n';
+	import Loading from '$lib/icons/Loading.svelte';
 	import { UserService, type Skill } from '$lib/services';
 	import type { SkillRepository } from '$lib/services/admin/types';
 	import { AiClient, COMMON_AI_CLIENTS_MAP } from '$lib/services/user/constants';
@@ -87,6 +88,23 @@
 		else openFolders.add(path);
 	}
 
+	// One-command install: a short-lived token lets curl / irm fetch the skill without a login.
+	let installToken = $state<string | undefined>(undefined);
+	let installTokenError = $state(false);
+
+	async function loadInstallToken() {
+		const skill = selectedSkillToInstall;
+		installToken = undefined;
+		installTokenError = false;
+		if (!skill) return;
+		try {
+			const { token } = await UserService.createSkillInstallToken(skill.id);
+			if (selectedSkillToInstall?.id === skill.id) installToken = token;
+		} catch (err) {
+			console.error('Failed to create skill install token', err);
+			if (selectedSkillToInstall?.id === skill.id) installTokenError = true;
+		}
+	}
 	let clientUnzipCommands = $derived.by(() => {
 		const skillName = sanitizeFilenameSegment(
 			selectedSkillToInstall?.name ?? selectedSkillToInstall?.id ?? 'skill'
@@ -99,6 +117,12 @@
 
 			return `unzip "$HOME/Downloads/${skillName}.zip" -d "$HOME/${clientSkillsDirectory}/${skillName}"`;
 		};
+		const oneCommand = (clientSkillsDirectory: string) => {
+			const url = `${page.url.origin}/api/skill-install/${installToken ?? ''}`;
+			return selectedTab === 'windows'
+				? `irm "${url}/windows?dir=${clientSkillsDirectory}" | iex`
+				: `curl -fsSL "${url}/unix?dir=${clientSkillsDirectory}" | sh`;
+		};
 
 		return [
 			{
@@ -106,26 +130,30 @@
 				label: 'Cursor',
 				icon: COMMON_AI_CLIENTS_MAP.get(AiClient.Cursor)?.icon,
 				iconDark: COMMON_AI_CLIENTS_MAP.get(AiClient.Cursor)?.iconDark,
-				command: command('.cursor/skills')
+				command: command('.cursor/skills'),
+				oneCommand: oneCommand('.cursor/skills')
 			},
 			{
 				id: 'claudeCode',
 				label: 'Claude Code',
 				icon: COMMON_AI_CLIENTS_MAP.get(AiClient.Claude)?.icon,
 				iconDark: COMMON_AI_CLIENTS_MAP.get(AiClient.Claude)?.iconDark,
-				command: command('.claude/skills')
+				command: command('.claude/skills'),
+				oneCommand: oneCommand('.claude/skills')
 			},
 			{
 				id: 'codex',
 				label: 'Codex',
 				icon: COMMON_AI_CLIENTS_MAP.get(AiClient.Codex)?.icon,
 				iconDark: COMMON_AI_CLIENTS_MAP.get(AiClient.Codex)?.iconDark,
-				command: command('.codex/skills')
+				command: command('.codex/skills'),
+				oneCommand: oneCommand('.codex/skills')
 			},
 			{
 				id: 'other',
 				label: m.skills_other(),
-				command: command('.agents/skills')
+				command: command('.agents/skills'),
+				oneCommand: oneCommand('.agents/skills')
 			}
 		];
 	});
@@ -396,28 +424,12 @@
 
 <ResponsiveDialog
 	bind:this={installSkillDialog}
+	onOpen={loadInstallToken}
 	animate="slide"
 	id="install-skill-dialog"
 	title={selectedSkillToInstall?.displayName}
 >
 	<div id="install-skill-dialog-content" class="w-full @container md:px-0 px-4">
-		<div id="download-skill-container">
-			<div class="divider md:mt-0">
-				{m.skills_install_step_download({
-					name: selectedSkillToInstall?.displayName ?? ''
-				})}
-			</div>
-			<div class="md:p-0 md:pb-0 p-4">
-				<button
-					class="btn btn-primary btn-sm w-full"
-					onclick={() => handleDownloadSkill(selectedSkillToInstall)}
-				>
-					<Download class="size-4" />
-					{m.skills_download()}
-				</button>
-			</div>
-		</div>
-		<div class="divider">{m.skills_install_step_unzip()}</div>
 		<div class="relative">
 			<p class="absolute top-1/2 -translate-y-1/2 left-2 text-xs font-semibold">
 				{m.skills_choose_os()}
@@ -445,6 +457,49 @@
 				</button>
 			</div>
 		</div>
+		<div id="one-command-install-container">
+			<div class="divider">{m.skills_install_one_command()}</div>
+			{#if installTokenError}
+				<p class="text-error mb-2 text-sm">{m.skills_install_one_command_error()}</p>
+			{:else if !installToken}
+				<Loading />
+			{:else}
+				<p class="text-muted-content mb-2 text-xs">{m.skills_install_one_command_desc()}</p>
+				<div class="flex flex-col gap-2">
+					{#each clientUnzipCommands as client (client.id)}
+						<CopyField
+							value={client.oneCommand}
+							id={`one-command-${client.id}`}
+							classes={{ inputLabel: 'bg-base-100 dark:bg-base-300', input: 'font-mono' }}
+						>
+							{#snippet preContent()}
+								<span class="label shrink-0 w-38 mr-0 text-base-content">{client.label}</span>
+							{/snippet}
+						</CopyField>
+					{/each}
+				</div>
+			{/if}
+		</div>
+		<p class="text-muted-content mt-6 text-center text-sm font-semibold">
+			{m.skills_install_or_by_hand()}
+		</p>
+		<div id="download-skill-container">
+			<div class="divider">
+				{m.skills_install_step_download({
+					name: selectedSkillToInstall?.displayName ?? ''
+				})}
+			</div>
+			<div class="md:p-0 md:pb-0 p-4">
+				<button
+					class="btn btn-primary btn-sm w-full"
+					onclick={() => handleDownloadSkill(selectedSkillToInstall)}
+				>
+					<Download class="size-4" />
+					{m.skills_download()}
+				</button>
+			</div>
+		</div>
+		<div class="divider">{m.skills_install_step_unzip()}</div>
 		<div id="unzip-skill-commands-container" class="flex gap-2 flex-col">
 			{#each clientUnzipCommands as client, index (client.id)}
 				<div id={`unzip-skill-command-${client.id}-container`}>
